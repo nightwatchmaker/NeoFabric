@@ -1,53 +1,102 @@
+[CmdletBinding()]
 param(
     [string]$MinecraftDir = "$env:APPDATA\.minecraft",
     [string]$Artifact = "",
     [string]$MinecraftVersion = "26.2",
-    [string]$ProfileId = "NeoFabric-26.2-dev"
+    [string]$ProfileId = "NeoFabric-26.2-dev",
+    [string]$LoaderVersion = "3.9.0-dev",
+    [string]$ManifestUrl = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+    [string]$LauncherProfilesFile = ""
 )
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 if ([string]::IsNullOrWhiteSpace($Artifact)) {
-    $Artifact = Join-Path $Root "build\libs\neofabric-loader-3.9.0-dev.jar"
+    $Artifact = Join-Path $Root ("build\libs\neofabric-loader-{0}.jar" -f $LoaderVersion)
 }
 if (-not (Test-Path -LiteralPath $Artifact -PathType Leaf)) {
-    throw "NeoFabric artifact not found: $Artifact. Build NeoFabric first."
+    throw "NeoFabric artifact not found: $Artifact"
 }
 $Artifact = (Resolve-Path -LiteralPath $Artifact).Path
-$ManifestUrl = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
-$Work = Join-Path ([System.IO.Path]::GetTempPath()) ("neofabric-official-" + [guid]::NewGuid())
-$VersionDir = Join-Path $MinecraftDir ("versions\" + $ProfileId)
-$LibraryDir = Join-Path $MinecraftDir "libraries\org\neofabric\loader\3.9.0-dev"
+$VersionDir = Join-Path $MinecraftDir ("installations\" + $ProfileId)
+$LibraryDir = Join-Path $MinecraftDir ("libraries\org\neofabric\loader\" + $LoaderVersion)
+$LibraryJar = Join-Path $LibraryDir ("loader-{0}.jar" -f $LoaderVersion)
+$Work = Join-Path ([System.IO.Path]::GetTempPath()) ("neofabric-official-" + [guid]::NewGuid().ToString())
 try {
-    New-Item -ItemType Directory -Force $Work, $VersionDir, $LibraryDir | Out-Null
-    $Manifest = Join-Path $Work "version_manifest.json"
-    Invoke-WebRequest -Uri $ManifestUrl -OutFile $Manifest -UseBasicParsing
-    $ManifestJson = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
-    $Version = $ManifestJson.versions | Where-Object { $_.id -eq $MinecraftVersion } | Select-Object -First 1
-    if ($null -eq $Version) { throw "Minecraft version $MinecraftVersion was not found in Mojang's manifest." }
-    $BaseJson = Join-Path $Work "$MinecraftVersion.json"
-    Invoke-WebRequest -Uri $Version.url -OutFile $BaseJson -UseBasicParsing
-    $Generator = Join-Path $Root "installer\generate-official-profile.py"
-    & python $Generator --base-json $BaseJson --loader-jar $Artifact --output-dir $VersionDir --id $ProfileId
-    if ($LASTEXITCODE -ne 0) { throw "Official profile generator failed with exit code $LASTEXITCODE." }
-    Copy-Item -LiteralPath $Artifact -Destination (Join-Path $LibraryDir "loader-3.9.0-dev.jar") -Force
-    $ProfileJson = Join-Path $VersionDir "$ProfileId.json"
-    $Profile = Get-Content -LiteralPath $ProfileJson -Raw | ConvertFrom-Json
-    $Profile.neoFabric.status = "development-profile-generated"
-    $Profile.neoFabric.targetMinecraftVersion = $MinecraftVersion
-    $Profile | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $ProfileJson -Encoding UTF8
-    $Jar = Join-Path $LibraryDir "loader-3.9.0-dev.jar"
-    $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Jar).Hash.ToLowerInvariant()
+    New-Item -ItemType Directory -Force -Path $Work, $VersionDir, $LibraryDir | Out-Null
+    $Manifest = Invoke-RestMethod -Uri $ManifestUrl -Method Get
+    $Version = @($Manifest.versions | Where-Object { $_.id -eq $MinecraftVersion }) | Select-Object -First 1
+    if ($null -eq $Version -or [string]::IsNullOrWhiteSpace([string]$Version.url)) {
+        throw "Minecraft version $MinecraftVersion was not found in the manifest."
+    }
+    $BaseJson = Join-Path $Work ("{0}.json" -f $MinecraftVersion)
+    Invoke-WebRequest -Uri ([string]$Version.url) -OutFile $BaseJson
+    $Base = Get-Content -LiteralPath $BaseJson -Raw | ConvertFrom-Json
+    foreach ($Required in @("id", "mainClass", "libraries")) {
+        if ($null -eq $Base.PSObject.Properties[$Required]) {
+            throw "Mojang version JSON is missing required field: $Required"
+        }
+    }
+    $NeoFabricLibrary = [pscustomobject]@{ name = "org.neofabric:loader:$LoaderVersion" }
+    $Libraries = @($Base.libraries) + @($NeoFabricLibrary)
+    $Profile = [ordered]@{
+        id = $ProfileId
+        inheritsFrom = $Base.id
+        type = "custom"
+        mainClass = "org.neofabric.launcher.NeoFabricLauncher"
+        arguments = if ($null -ne $Base.PSObject.Properties["arguments"]) { $Base.arguments } else { [pscustomobject]@{} }
+        jvmArguments = if ($null -ne $Base.PSObject.Properties["jvmArguments"]) { $Base.jvmArguments } else { @() }
+        libraries = $Libraries
+        neoFabric = [ordered]@{
+            development = $true
+            loaderJar = [System.IO.Path]::GetFileName($Artifact)
+            targetMainClass = $Base.mainClass
+            targetMinecraftVersion = $MinecraftVersion
+            status = "development-profile-generated"
+        }
+    }
+    $ProfileJson = Join-Path $VersionDir ("{0}.json" -f $ProfileId)
+    $Profile | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $ProfileJson -Encoding UTF8
+    Copy-Item -LiteralPath $Artifact -Destination $LibraryJar -Force
+    if ([string]::IsNullOrWhiteSpace($LauncherProfilesFile)) {
+        $storeProfiles = Join-Path $MinecraftDir "launcher_profiles_microsoft_store.json"
+        $legacyProfiles = Join-Path $MinecraftDir "launcher_profiles.json"
+        $LauncherProfilesFile = if (Test-Path -LiteralPath $storeProfiles) { $storeProfiles } else { $legacyProfiles }
+    }
+    if (Test-Path -LiteralPath $LauncherProfilesFile) {
+        $LauncherProfiles = Get-Content -LiteralPath $LauncherProfilesFile -Raw | ConvertFrom-Json
+    } else {
+        $LauncherProfiles = [pscustomobject]@{ profiles = [pscustomobject]@{} }
+    }
+    if ($null -eq $LauncherProfiles.PSObject.Properties["profiles"]) {
+        $LauncherProfiles | Add-Member -NotePropertyName profiles -NotePropertyValue ([pscustomobject]@{})
+    }
+    $ProfileKey = "neofabric-" + ($ProfileId.ToLowerInvariant() -replace "[^a-z0-9]+", "-").Trim("-")
+    $Now = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'")
+    $Entry = [pscustomobject]@{
+        name = "NeoFabric $MinecraftVersion (development)"
+        type = "custom"
+        created = $Now
+        lastUsed = $Now
+        lastVersionId = $ProfileId
+        gameDir = $MinecraftDir
+    }
+    $LauncherProfiles.profiles | Add-Member -NotePropertyName $ProfileKey -NotePropertyValue $Entry -Force
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $LauncherProfilesFile) | Out-Null
+    $LauncherProfiles | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $LauncherProfilesFile -Encoding UTF8
+    $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $LibraryJar).Hash.ToLowerInvariant()
     @(
-        "NeoFabric official-launcher development profile"
+        "NeoFabric official Minecraft Launcher development profile"
         "Profile: $ProfileId"
         "Minecraft: $MinecraftVersion"
         "Profile JSON: $ProfileJson"
-        "Loader library: $Jar"
+        "Loader library: $LibraryJar"
+        "Launcher profiles: $LauncherProfilesFile"
         "Loader SHA-256: $Hash"
-        "Status: development-only; use the official launcher profile only for bootstrap testing"
+        "Status: development-only"
     ) | Set-Content -LiteralPath (Join-Path $VersionDir "INSTALL-MANIFEST.txt") -Encoding UTF8
-    Write-Host "Generated official Minecraft Launcher profile: $ProfileJson"
-    Write-Host "Installed NeoFabric library: $Jar"
+    Write-Host "Generated profile: $ProfileJson"
+    Write-Host "Registered launcher installation: $LauncherProfilesFile"
+    Write-Host "Installed library: $LibraryJar"
     Write-Host "SHA-256: $Hash"
 } finally {
     if (Test-Path -LiteralPath $Work) { Remove-Item -LiteralPath $Work -Recurse -Force }
