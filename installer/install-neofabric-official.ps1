@@ -17,7 +17,7 @@ if (-not (Test-Path -LiteralPath $Artifact -PathType Leaf)) {
     throw "NeoFabric artifact not found: $Artifact"
 }
 $Artifact = (Resolve-Path -LiteralPath $Artifact).Path
-$VersionDir = Join-Path $MinecraftDir ("installations\" + $ProfileId)
+$VersionDir = Join-Path $MinecraftDir ("versions\" + $ProfileId)
 $LibraryDir = Join-Path $MinecraftDir ("libraries\org\neofabric\loader\" + $LoaderVersion)
 $LibraryJar = Join-Path $LibraryDir ("loader-{0}.jar" -f $LoaderVersion)
 $Work = Join-Path ([System.IO.Path]::GetTempPath()) ("neofabric-official-" + [guid]::NewGuid().ToString())
