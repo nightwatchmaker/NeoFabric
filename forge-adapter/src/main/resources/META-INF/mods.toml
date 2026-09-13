@@ -1,0 +1,9 @@
+modLoader="javafml"
+loaderVersion="[65,)"
+license="MIT"
+
+[[mods]]
+modId="neofabric-loader"
+version="0.3.0-dev"
+displayName="NeoFabric 26.2 Loader"
+description='NeoFabric 26.2 Forge bootstrap component.'
